@@ -1,8 +1,14 @@
 import logging
+from typing import Any
+from collections.abc import Callable, Awaitable
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import SummarizationMiddleware
+from langchain_core.messages import RemoveMessage
+from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.prebuilt.tool_node import ToolCallRequest
+from langgraph.types import Command
 
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
@@ -77,7 +83,23 @@ def _create_summarization_middleware() -> SummarizationMiddleware | None:
     if config.summary_prompt is not None:
         kwargs["summary_prompt"] = config.summary_prompt
 
-    return SummarizationMiddleware(**kwargs)
+    class SafeSummarizationMiddleware(SummarizationMiddleware):
+        """Wrapper to prevent SummarizationMiddleware from destructively overwriting state."""
+
+        def before_model(self, state, runtime):
+            return None
+
+        async def abefore_model(self, state, runtime):
+            return None
+
+        async def awrap_model_call(self, request, handler: Callable[[ToolCallRequest], Awaitable[Any]]) -> Any:
+            state_update = await super().abefore_model(request.state, request.runtime)
+            if state_update and "messages" in state_update:
+                messages_to_send = [msg for msg in state_update["messages"] if not isinstance(msg, RemoveMessage)]
+                request = request.override(messages=messages_to_send)
+            return await handler(request)
+
+    return SafeSummarizationMiddleware(**kwargs)
 
 
 def _create_todo_list_middleware(is_plan_mode: bool) -> TodoMiddleware | None:
